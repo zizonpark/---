@@ -26,7 +26,6 @@ except ImportError:
     legacy_genai = None
 
 from dreadnode_final import (
-    GEMINI_API_KEYS,
     TECHNIQUE_MAP,
     load_json_or_jsonl,
     prompt_to_text,
@@ -39,7 +38,6 @@ DEFAULT_CHAR_LIMIT = 2048
 DEFAULT_PROMPTS_PER_TECHNIQUE = 3
 DEFAULT_MIXED_PER_PAIR = 1
 GEMINI_DELIMITER = "|||"
-DEFAULT_GEMINI_API_KEY = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else None
 
 
 def find_prompt_file(prompt_dir: Path, probe_name: str) -> Optional[Path]:
@@ -92,6 +90,22 @@ def strip_code_fence(text: str) -> str:
     text = re.sub(r"^```(?:text|json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     return text.strip()
+
+
+def load_env_file(path: Path = Path(".env")) -> None:
+    if not path.exists():
+        return
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def build_mix_instruction(
@@ -197,7 +211,8 @@ def main():
         for technique, probe_name in selected_map.items()
     }
 
-    api_key = os.environ.get("GEMINI_API_KEY") or DEFAULT_GEMINI_API_KEY
+    load_env_file()
+    api_key = os.environ.get("GEMINI_API_KEY")
     client = get_client(api_key)
     mixed_results = []
 
