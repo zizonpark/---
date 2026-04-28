@@ -836,8 +836,8 @@ def main():
     save_json(Path(args.responses_json), all_responses)
     save_json(Path(args.gemini_json), all_gemini_prompts)
     
-    print(f"\n[????꾨즺 1] ?쒕쾭 ?묐떟 寃곌낵: {args.responses_json}")
-    print(f"[????꾨즺 2] Gemini ?앹꽦 ?꾨＼?꾪듃 紐⑥쓬: {args.gemini_json}")
+    print(f"\n[저장 완료 1] 서버 응답 결과: {args.responses_json}")
+    print(f"[저장 완료 2] Gemini 생성 프롬프트 모음: {args.gemini_json}")
     
     print("\n" + "=" * 60)
     print(f"[Final stats] attempts={global_attempts} flags={global_flag_count}")
