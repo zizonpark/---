@@ -544,7 +544,7 @@ def post_single_prompt(
         return resp.status_code, {
             "url": resp.url,
             "redirected": bool(resp.history),
-            "raw_text": resp.text[:2000],
+            "raw_text": resp.text,
         }
 
     server_api_key = os.environ.get("DREADNODE_API_KEY")
