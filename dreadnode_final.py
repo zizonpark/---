@@ -18,7 +18,7 @@ import subprocess
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-# Windows ?곕????대え吏/?쒓? 異쒕젰(?몄퐫?? ?먮윭 諛⑹????덉쟾?μ튂
+# Windows 터미널 이모지/한글 출력 인코딩 오류 방지 안전장치
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 if hasattr(sys.stderr, 'reconfigure'):
@@ -34,7 +34,7 @@ try:
 except ImportError:
     genai = None
 
-# ?쒓났?댁＜??20媛쒖쓽 Gemini API ??紐⑸줉 (?먮룞 ?쒗솚 ?⑸룄)
+# 제공받은 20개의 Gemini API 키 목록 (자동 전환 용도)
 GEMINI_API_KEYS =[
     "AIzaSyA7h3KlSD4z_rJb_NoD34wJooXf6tF2hYQ",
     "AIzaSyARmW0Ij08gS0MMnFO8TySfZLJm5xEL6LA",
@@ -74,10 +74,10 @@ class GeminiKeyManager:
             return False
         self.current_idx += 1
         if self.current_idx >= len(self.keys):
-            print("\n?좑툘 [寃쎄퀬] 以鍮꾨맂 20媛쒖쓽 API ?ㅻ? 紐⑤몢 ?뚯쭊?덉뒿?덈떎! 泥?踰덉㎏ ?ㅻ줈 ?뚯븘媛묐땲?? (?좎떆 ???ㅼ떆 ?쒕룄?⑸땲??")
+            print("\n[경고] 준비된 20개의 API 키를 모두 사용했습니다! 첫 번째 키로 돌아갑니다. (잠시 후 다시 시도합니다.)")
             self.current_idx = 0
             return False
-        print(f"\n?봽[API ???먮룞 援먯껜] {self.current_idx}踰???留뚮즺. ?ㅼ쓬 ??{self.current_idx + 1}/{len(self.keys)})濡??꾪솚?섏뿬 ?댁뼱??吏꾪뻾?⑸땲??")
+        print(f"\n[API 키 자동 교체] {self.current_idx}번 키가 만료되었습니다. 다음 키({self.current_idx + 1}/{len(self.keys)})로 전환하여 계속 진행합니다.")
         return True
 
 REPORT_PATH_RE = re.compile(
@@ -94,7 +94,7 @@ TECHNIQUE_MAP = {
     "Payload Splitting": "snowball"
 }
 
-# ?뙚 媛??뚯씪(湲곕쾿) ??理쒕?濡??좎????꾨＼?꾪듃 媛쒖닔
+# 각 파일(기법)에서 최대한 사용할 프롬프트 개수
 MAX_EXTRACTED_PROMPTS = 5
 
 def pretty(obj):
@@ -112,8 +112,8 @@ def run_garak(target_type: str, target_name: str, probes: str, extra_args: List[
     ] + extra_args
 
     print("=" * 80)
-    print(f"?룂[Garak ?먮낯 ?ㅽ뻾] Probes: {probes}")
-    print("紐낅졊?? " + " ".join(f'"{x}"' if " " in x else x for x in cmd))
+    print(f"[Garak 원본 실행] Probes: {probes}")
+    print("명령어: " + " ".join(f'"{x}"' if " " in x else x for x in cmd))
     print("=" * 80)
 
     p = subprocess.Popen(
@@ -135,10 +135,10 @@ def run_garak(target_type: str, target_name: str, probes: str, extra_args: List[
             detected_report = Path(m.group(1))
 
     rc = p.wait()
-    print(f"\n[garak 醫낅즺 肄붾뱶] {rc}")
+    print(f"\n[garak 종료 코드] {rc}")
 
     if detected_report and detected_report.exists():
-        print(f"[媛먯???report ?뚯씪] {detected_report}")
+        print(f"[감지된 report 파일] {detected_report}")
         return detected_report
 
     return None
@@ -238,14 +238,14 @@ def get_prompts_for_probe(
     
     extracted =[]
     
-    # 1. ?뚯씪 ?쒖뒪?쒖뿉??罹먯떆 ?뚯씪 濡쒕뱶
+    # 1. 파일 시스템에서 캐시 파일 로드
     matched_files =[
         f for f in cache_dir.iterdir() 
         if f.is_file() and probe_name.lower() in f.name.lower()
     ]
     
     if matched_files:
-        print(f"\n?벀 [罹먯떆 諛쒓껄] '{probe_name}' ?⑦꽩??'{cache_dir}' ?대뜑?먯꽌 李얠븯?듬땲??")
+        print(f"\n[캐시 발견] '{probe_name}' 패턴을 '{cache_dir}' 폴더에서 찾았습니다.")
         for file_path in matched_files:
             try:
                 entries = load_json_or_jsonl(file_path)
@@ -270,26 +270,26 @@ def get_prompts_for_probe(
                     continue
                     
             except Exception as e:
-                print(f"   ?좑툘 [罹먯떆 濡쒕뱶 ?ㅽ뙣] {file_path.name}: {e}")
+                print(f"   [캐시 로드 실패] {file_path.name}: {e}")
                 
         if extracted:
-            # ?뙚[?ㅼ씠?댄듃 ?듭떖] 濡쒕뱶???꾨＼?꾪듃媛 ?섎갚 媛쒕씪??臾댁“嫄??욎뿉?쒕???5媛쒕쭔 ?먮쫭?덈떎.
+            # 사이트 특성상 로드된 프롬프트가 너무 많으면 앞에서 5개만 사용한다.
             if len(extracted) > MAX_EXTRACTED_PROMPTS:
-                print(f"   => ?귨툘 API ?덉빟???꾪빐 珥?{len(extracted)}媛쒖쓽 ?꾨＼?꾪듃 以?{MAX_EXTRACTED_PROMPTS}媛쒕쭔 ?④린怨??먮쫭?덈떎.")
+                print(f"   => API 절약을 위해 총 {len(extracted)}개의 프롬프트 중 {MAX_EXTRACTED_PROMPTS}개만 남기고 자릅니다.")
                 extracted = extracted[:MAX_EXTRACTED_PROMPTS]
                 
-                # ?먮Ⅸ 踰꾩쟾???ㅼ떆 ?뚯씪????뼱?⑥꽌 ?꾩삁 ?뚯씪 ?⑸웾 ?먯껜瑜?以꾩뿬踰꾨┝
+                # 다음 실행에서도 같은 기준을 쓰도록 기존 파일 자체를 줄여 저장한다.
                 save_json(matched_files[0], extracted)
-                print(f"   => ?뮶 湲곗〈 ?뚯씪({matched_files[0].name})??5媛쒕줈 ?ㅼ씠?댄듃?섏뿬 ??뼱?쇱뒿?덈떎.")
+                print(f"   => 기존 파일({matched_files[0].name})을 5개로 다이어트하여 저장했습니다.")
             else:
-                print(f"   => {matched_files[0].name}: {len(extracted)}媛??꾨＼?꾪듃 濡쒕뱶 ?꾨즺.")
+                print(f"   => {matched_files[0].name}: {len(extracted)}개 프롬프트 로드 완료.")
                 
             return extracted
         else:
-            print(f"   ?좑툘 [罹먯떆 ?ㅻ쪟] ?뚯씪??李얠븯?쇰굹 異붿텧???ㅽ뙣?덉뒿?덈떎. Garak???ㅽ뻾?⑸땲??")
+            print("   [캐시 오류] 파일은 찾았으나 추출에 실패했습니다. Garak을 실행합니다.")
 
-    # 2. ?뚯씪???놁쓣 寃쎌슦 Garak ?ㅽ뻾
-    print(f"\n?룂[罹먯떆 ?놁쓬] '{probe_name}'??????좏슚??罹먯떆媛 ?놁뼱 Garak???덈줈 ?ㅽ뻾?⑸땲??..")
+    # 2. 파일이 없을 경우 Garak 실행
+    print(f"\n[캐시 없음] '{probe_name}'에 대한 유효한 캐시가 없어 Garak을 새로 실행합니다...")
     report_path = run_garak(
         target_type=target_type,
         target_name=target_name,
@@ -302,13 +302,13 @@ def get_prompts_for_probe(
         extracted = extract_prompt_probe(entries)
         
         if extracted:
-            # ?뙚 [?ㅼ씠?댄듃 ?듭떖] Garak?먯꽌 ?섎갚 媛쒕? 戮묒븘?붾뜑?쇰룄 ??ν븷 ??5媛쒕쭔 ???
+            # 사이트 특성상 Garak에서 많이 추출되더라도 저장할 때 5개만 남긴다.
             if len(extracted) > MAX_EXTRACTED_PROMPTS:
                 extracted = extracted[:MAX_EXTRACTED_PROMPTS]
                 
             cache_file = cache_dir / f"{probe_name}.json"
             save_json(cache_file, extracted)
-            print(f"?뮶 [罹먯떆 ??? API ?덉빟???꾪빐 戮묓엺 ?꾨＼?꾪듃 以?{MAX_EXTRACTED_PROMPTS}媛쒕쭔 異붾젮?댁뼱 {cache_file}????ν뻽?듬땲??")
+            print(f"[캐시 저장] API 절약을 위해 추출된 프롬프트 중 {MAX_EXTRACTED_PROMPTS}개만 추려 {cache_file}에 저장했습니다.")
             
     return extracted
 
@@ -395,26 +395,26 @@ def post_prompts_to_endpoint(
             if task or len(original_prompt) > current_limit or repeat_count > 1:
                 gemini_api_key = key_manager.get_current_key()
                 if not genai or not gemini_api_key:
-                    print("[寃쎄퀬] Gemini ?ㅼ젙/?ㅺ? ?놁뼱 ?꾨＼?꾪듃 ?섏젙??嫄대꼫?곷땲??")
+                    print("[경고] Gemini 설정 또는 API 키가 없어 프롬프트 수정을 건너뜁니다.")
                     break
                     
                 gemini_api_attempts += 1
                 try:
-                    print(f"?봽[Gemini] {variations_needed}媛쒖쓽 蹂???꾨＼?꾪듃 ?앹꽦 ?붿껌 以?.. (?쒗븳: {current_limit}?? ?쒕룄: {gemini_api_attempts}/{max_gemini_attempts})")
+                    print(f"[Gemini] {variations_needed}개의 변형 프롬프트 생성을 요청 중... (제한: {current_limit}자, 시도: {gemini_api_attempts}/{max_gemini_attempts})")
                     variations = generate_variations_with_gemini(original_prompt, gemini_api_key, task, current_limit, variations_needed)
-                    print(f"??[Gemini] {len(variations)}媛쒖쓽 蹂???꾨＼?꾪듃 ?앹꽦 ?꾨즺!")
+                    print(f"[Gemini] {len(variations)}개의 변형 프롬프트 생성 완료!")
                 except Exception as e:
                     err_str = str(e)
                     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota" in err_str:
                         switched = key_manager.switch_to_next_key()
                         if not switched:
-                            print("??Rate Limit] 紐⑤뱺 ?ㅺ? ?뚯쭊?섏뿀?듬땲?? 15珥??湲????ъ떆?꾪빀?덈떎...")
+                            print("[Rate Limit] 모든 키를 사용했습니다. 15초 대기 후 다시 시도합니다...")
                             time.sleep(15)
                         else:
                             gemini_api_attempts -= 1
                             time.sleep(1) 
                     else:
-                        print(f"??Gemini ?앹꽦 ?ㅽ뙣] {err_str}")
+                        print(f"[Gemini 생성 실패] {err_str}")
                         time.sleep(3)
                     continue
             else:
@@ -440,7 +440,7 @@ def post_prompts_to_endpoint(
                 })
                 
                 if len(prompt) > current_limit:
-                    print(f"[?ㅽ궢] ?앹꽦???꾨＼?꾪듃({len(prompt)}??媛 ?쒗븳({current_limit}????珥덇낵?? (?ъ깮???덉젙)")
+                    print(f"[스킵] 생성된 프롬프트({len(prompt)}자)가 제한({current_limit}자)을 초과했습니다. (재생성 예정)")
                     continue
 
                 try:
@@ -475,7 +475,7 @@ def post_prompts_to_endpoint(
                     variations_needed -= 1
 
                 except Exception as e:
-                    print(f"  ???꾩넚 ?ㅽ뙣] {e}")
+                    print(f"  [전송 실패] {e}")
                     out.append({
                         "endpoint": endpoint,
                         "probe_name": probe_name,
@@ -485,12 +485,12 @@ def post_prompts_to_endpoint(
                     variations_needed -= 1
                     
             if new_limit_detected:
-                print(f"  ?봽[?ъ떆?? 蹂寃쎈맂 {current_limit}???쒗븳??留욎떠 ?⑥? {variations_needed}媛쒖쓽 ?꾨＼?꾪듃瑜??ㅼ떆 ?앹꽦?⑸땲??")
+                print(f"  [재시도] 변경된 {current_limit}자 제한에 맞춰 남은 {variations_needed}개의 프롬프트를 다시 생성합니다.")
                 time.sleep(2)
                 continue
                 
         if variations_needed > 0:
-            print(f"\n?좑툘[寃쎄퀬] 理쒕? ?ъ떆??{max_gemini_attempts}??瑜?珥덇낵?섏뿬, ?⑥? {variations_needed}媛쒖쓽 ?꾨＼?꾪듃 ?앹꽦???ш린?⑸땲??")
+            print(f"\n[경고] 최대 재시도 횟수({max_gemini_attempts}회)를 초과하여, 남은 {variations_needed}개의 프롬프트 생성을 포기합니다.")
             
         time.sleep(1) 
 
@@ -712,10 +712,10 @@ def post_prompts_to_endpoint(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Garak ?ㅻ쭏??罹먯떛 + Gemini ?ㅼ쨷 ??蹂??+ ?ㅼ쨷 ?붾뱶?ъ씤???꾩넚")
+    parser = argparse.ArgumentParser(description="Garak 프롬프트 캐싱 + Gemini 다중 변형 + 다중 엔드포인트 전송")
     parser.add_argument("--target-type", default="huggingface")
     parser.add_argument("--target-name", default="gpt2")
-    parser.add_argument("--probes", default="ignored", help="?먮룞??紐⑤뱶?먯꽌??臾댁떆?⑸땲??")
+    parser.add_argument("--probes", default="ignored", help="자동 모드에서는 무시됩니다.")
     parser.add_argument("--extra-garak-args", nargs="*", default=[])
     parser.add_argument("--responses-json", default="responses.json")
     parser.add_argument("--gemini-json", default="gemini_modified_prompts.json")
@@ -729,7 +729,7 @@ def main():
     args = parser.parse_args()
 
     if not args.send_endpoint:
-        print("?먮윭: --send-endpoint ?뚮씪誘명꽣媛 ?꾩슂?⑸땲??")
+        print("오류: --send-endpoint 파라미터가 필요합니다.")
         sys.exit(1)
 
     key_manager = GeminiKeyManager(GEMINI_API_KEYS)
@@ -743,8 +743,8 @@ def main():
         suffixes =[1, 2, 3, 2]
         endpoints =[f"https://{args.send_endpoint}{i}.platform.dreadnode.io/score" for i in suffixes]
 
-    # ?뙚 1?④퀎: 6媛吏 湲곕낯 湲곕쾿??????꾨＼?꾪듃 ?뺣낫
-    print("\n[??] 1?④퀎: Garak Probes 罹먯떛 諛??꾨＼?꾪듃 濡쒕뱶 (媛?湲곕쾿??理쒕? 5媛?")
+    # 1단계: 6가지 기본 기법에 대한 프롬프트 확보
+    print("\n[1단계] Garak Probes 캐싱 및 프롬프트 로드 (각 기법당 최대 5개)")
     PROMPT_CACHE = {}
     for tech_name, probe_name in TECHNIQUE_MAP.items():
         prompts = get_prompts_for_probe(
@@ -754,10 +754,10 @@ def main():
             extra_args=args.extra_garak_args
         )
         if not prompts:
-            print(f"?좑툘 [寃쎄퀬] '{tech_name}' ({probe_name}) 湲곕쾿?먯꽌 ?꾨＼?꾪듃瑜?異붿텧?섏? 紐삵뻽?듬땲??")
+            print(f"[경고] '{tech_name}' ({probe_name}) 기법에서 프롬프트를 추출하지 못했습니다.")
         PROMPT_CACHE[tech_name] = prompts
 
-    # ?뙚 2?④퀎: 湲곕쾿 議고빀 ?앹꽦
+    # 2단계: 기법 조합 생성
     techniques_list = list(TECHNIQUE_MAP.keys())
     combinations =[]
     for t in techniques_list:
@@ -770,36 +770,36 @@ def main():
     global_flag_count = 0
     global_attempts = 0
 
-    print(f"\n[??] 2?④퀎: 珥?{len(combinations)}媛吏??湲곕쾿 議고빀 ?뚯뒪?몃? ?쒖옉?⑸땲??")
-    print(f"    (?ъ슜 媛?ν븳 Gemini API ?? {len(GEMINI_API_KEYS)}媛??湲?以?\n")
+    print(f"\n[2단계] 총 {len(combinations)}가지 기법 조합 테스트를 시작합니다.")
+    print(f"    (사용 가능한 Gemini API 키 {len(GEMINI_API_KEYS)}개 대기 중)\n")
 
     for combo in combinations:
         combo_name = " + ".join(combo)
         
-        # 議고빀???ы븿??湲곕쾿?ㅼ쓽 罹먯떆???꾨＼?꾪듃瑜?痍⑦빀 (?⑹퀜??10媛쒓? ???섎룄 ?덉쓬)
+        # 조합에 포함된 기법들의 캐시 프롬프트를 취합한다. (합치면 10개가 넘을 수도 있음)
         extracted =[]
         for t in combo:
             if PROMPT_CACHE.get(t):
                 extracted.extend(PROMPT_CACHE[t])
 
         if not extracted:
-            print(f"?좑툘[嫄대꼫?] '{combo_name}' 議고빀???????덈뒗 ?꾨＼?꾪듃媛 ?놁뒿?덈떎.")
+            print(f"[건너뜀] '{combo_name}' 조합에는 사용할 수 있는 프롬프트가 없습니다.")
             continue
             
-        # ?뙚 議고빀 ?⑥쐞?먯꽌??理쒕? 5媛쒓퉴吏留?Gemini???꾩넚?섎룄濡???踰????꾧꺽???쒗븳
+        # 조합 단위에서도 최대 5개까지만 Gemini로 전송하도록 제한한다.
         extracted = extracted[:MAX_EXTRACTED_PROMPTS]
         
         garak_probes_list = [TECHNIQUE_MAP[t] for t in combo]
         garak_probes_str = ",".join(garak_probes_list)
         
         print(f"\n\n{'*'*80}")
-        print(f"?㎦[湲곕쾿 議고빀 ?뚯뒪?? {combo_name}")
-        print(f"   (?뚯뒪?명븷 ?꾨＼?꾪듃 ?? {len(extracted)}媛?")
+        print(f"[기법 조합 테스트] {combo_name}")
+        print(f"   (테스트할 프롬프트 수: {len(extracted)}개)")
         print(f"{'*'*80}")
 
         for endpoint in endpoints:
             print(f"\n{'='*70}")
-            print(f"?렞[?寃??쒕쾭 ?묒냽] {endpoint}")
+            print(f"[대상 서버 접속] {endpoint}")
             print(f"{'='*70}")
             
             current_limit = 2048 if args.platform == "alignmentarena" else 250
@@ -832,7 +832,7 @@ def main():
 
             all_responses.extend(responses)
 
-    # 紐⑤뱺 怨쇱젙???앸굹硫?理쒖쥌 寃곌낵 ???
+    # 모든 과정이 끝나면 최종 결과 저장
     save_json(Path(args.responses_json), all_responses)
     save_json(Path(args.gemini_json), all_gemini_prompts)
     
