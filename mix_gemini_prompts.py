@@ -16,9 +16,14 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 try:
-    from google import genai
+    from google import genai as google_genai
 except ImportError:
-    genai = None
+    google_genai = None
+
+try:
+    import google.generativeai as legacy_genai
+except ImportError:
+    legacy_genai = None
 
 from dreadnode_final import (
     GEMINI_API_KEYS,
@@ -114,7 +119,7 @@ def build_mix_instruction(
 
 
 def generate_mixed_prompts(
-    client: "genai.Client",
+    client: Dict[str, object],
     model: str,
     left: Dict[str, str],
     right: Dict[str, str],
@@ -122,19 +127,38 @@ def generate_mixed_prompts(
     num_outputs: int,
 ) -> List[str]:
     instruction = build_mix_instruction(left, right, char_limit, num_outputs)
-    response = client.models.generate_content(model=model, contents=instruction)
+    if client["sdk"] == "google-genai":
+        response = client["client"].models.generate_content(model=model, contents=instruction)
+    else:
+        model_client = client["module"].GenerativeModel(model)
+        response = model_client.generate_content(instruction)
     text = strip_code_fence(response.text or "")
     mixed = [item.strip() for item in text.split(GEMINI_DELIMITER) if item.strip()]
     return mixed[:num_outputs]
 
 
-def get_client(key_manager: GeminiKeyManager) -> "genai.Client":
+def get_client(key_manager: GeminiKeyManager) -> Dict[str, object]:
     api_key = os.environ.get("GEMINI_API_KEY") or key_manager.get_current_key()
-    if not genai:
-        raise RuntimeError("google-genai is not installed.")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY or a Gemini key in dreadnode_final.py is required.")
-    return genai.Client(api_key=api_key)
+
+    if google_genai:
+        return {
+            "sdk": "google-genai",
+            "client": google_genai.Client(api_key=api_key),
+        }
+
+    if legacy_genai:
+        legacy_genai.configure(api_key=api_key)
+        return {
+            "sdk": "google-generativeai",
+            "module": legacy_genai,
+        }
+
+    raise RuntimeError(
+        "Gemini SDK is not installed. Install one of: "
+        "pip install google-genai OR pip install google-generativeai"
+    )
 
 
 def main():
