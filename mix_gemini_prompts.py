@@ -28,7 +28,6 @@ except ImportError:
 from dreadnode_final import (
     GEMINI_API_KEYS,
     TECHNIQUE_MAP,
-    GeminiKeyManager,
     load_json_or_jsonl,
     prompt_to_text,
     save_json,
@@ -40,6 +39,7 @@ DEFAULT_CHAR_LIMIT = 2048
 DEFAULT_PROMPTS_PER_TECHNIQUE = 3
 DEFAULT_MIXED_PER_PAIR = 1
 GEMINI_DELIMITER = "|||"
+DEFAULT_GEMINI_API_KEY = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else None
 
 
 def find_prompt_file(prompt_dir: Path, probe_name: str) -> Optional[Path]:
@@ -137,10 +137,9 @@ def generate_mixed_prompts(
     return mixed[:num_outputs]
 
 
-def get_client(key_manager: GeminiKeyManager) -> Dict[str, object]:
-    api_key = os.environ.get("GEMINI_API_KEY") or key_manager.get_current_key()
+def get_client(api_key: Optional[str]) -> Dict[str, object]:
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY or a Gemini key in dreadnode_final.py is required.")
+        raise RuntimeError("A single Gemini API key is required.")
 
     if google_genai:
         return {
@@ -198,8 +197,8 @@ def main():
         for technique, probe_name in selected_map.items()
     }
 
-    key_manager = GeminiKeyManager(GEMINI_API_KEYS)
-    client = get_client(key_manager)
+    api_key = os.environ.get("GEMINI_API_KEY") or DEFAULT_GEMINI_API_KEY
+    client = get_client(api_key)
     mixed_results = []
 
     technique_pairs = list(itertools.combinations(prompts_by_technique.keys(), 2))
