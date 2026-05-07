@@ -41,26 +41,7 @@ except ImportError:
 
 # 제공받은 20개의 Gemini API 키 목록 (자동 전환 용도)
 GEMINI_API_KEYS =[
-    "AIzaSyA7h3KlSD4z_rJb_NoD34wJooXf6tF2hYQ",
-    "AIzaSyARmW0Ij08gS0MMnFO8TySfZLJm5xEL6LA",
-    "AIzaSyBHCRIH6c7YrduPcFirvSjG7oAsIN_cpXk",
-    "AIzaSyDc-JrWbEk44AxkTQ35FJSDkwb6jPX9LW0",
-    "AIzaSyCO4p4ryrg0MHdBrUzyXyAwbhqMR0zXjlg",
-    "AIzaSyCkI9Xf0eb02tn3VANLsZyns91VoZ5LXQw",
-    "AIzaSyA4kx3OAdznzfVD1GXoMZiD8QO3brxVFKM",
-    "AIzaSyCVWnBf5sNT-a5WK7tXzz8UWP69MH6DLZM",
-    "AIzaSyC97I_yfGeeYViQA0PPwTbpD-1DuKcAIjU",
-    "AIzaSyAgf6nX2qhnHhBti8O1UMVXC57cN7ywG_Q",
-    "AIzaSyDQDTt0Hq5GJOn8klk7SwAWT-eZq4jb62E",
-    "AIzaSyAer_fIHaIo0FhnCJ3BgI3XrHuVztK75ec",
-    "AIzaSyDd-rQ2JQHiGwogRXwhjfDFYggLhM1rja4",
-    "AIzaSyBX0ROB7pcKyf6FfAp7RTSRZNkXO-ZSjTI",
-    "AIzaSyB9_CVAO-mLCGNfnJpxWJQydOQAGT-WxDk",
-    "AIzaSyCNx8SZ1DYJj03uthTJMUXQA_ydxKdsvAw",
-    "AIzaSyAwJ6acE5jrznF8MMhPXHEANRAXOAdt7jQ",
-    "AIzaSyB8jm3ID5oYijzGkxuPj9O-Qs2zD6nV-x4",
-    "AIzaSyAKxAl40Zc4Tx34AzhTM9RMUiSQ39HW6vU",
-    "AIzaSyBjYyAzCLHDfFiA40J5iSfK0rTpMkEBxKU"
+    "AIzaSyAhDDYi_0fGBY6A1D3HKUChNh7YgzE-anw"
 ]
 
 class GeminiKeyManager:
