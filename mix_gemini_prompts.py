@@ -43,6 +43,15 @@ DEFAULT_CHAR_LIMIT = 2048
 DEFAULT_PROMPTS_PER_TECHNIQUE = 3
 DEFAULT_MIXED_PER_PAIR = 1
 GEMINI_DELIMITER = "|||"
+RETRYABLE_ERROR_TOKENS = (
+    "429",
+    "503",
+    "RESOURCE_EXHAUSTED",
+    "UNAVAILABLE",
+    "high demand",
+    "rate limit",
+    "temporarily",
+)
 
 # 모델별 1M 토큰당 USD 가격 (input / output)
 MODEL_PRICING = {
@@ -149,9 +158,22 @@ def build_mix_instruction(
     )
 
 
+def is_retryable_gemini_error(error: Exception) -> bool:
+    message = str(error)
+    return any(token.lower() in message.lower() for token in RETRYABLE_ERROR_TOKENS)
+
+
+def generate_content(client: Dict[str, object], model: str, instruction: str):
+    if client["sdk"] == "google-genai":
+        return client["client"].models.generate_content(model=model, contents=instruction)
+
+    model_client = client["module"].GenerativeModel(model)
+    return model_client.generate_content(instruction)
+
+
 def generate_mixed_prompts(
     client: Dict[str, object],
-    model: str,
+    models: List[str],
     left: Dict[str, str],
     right: Dict[str, str],
     char_limit: int,
@@ -232,6 +254,9 @@ def main():
     parser.add_argument("--prompts-per-technique", type=int, default=DEFAULT_PROMPTS_PER_TECHNIQUE)
     parser.add_argument("--mixed-per-pair", type=int, default=DEFAULT_MIXED_PER_PAIR)
     parser.add_argument("--techniques", nargs="*", default=list(TECHNIQUE_MAP.keys()))
+    parser.add_argument("--retries", type=int, default=5)
+    parser.add_argument("--retry-delay", type=float, default=15.0)
+    parser.add_argument("--retry-backoff", type=float, default=1.8)
     parser.add_argument("--sleep", type=float, default=1.0)
     parser.add_argument("--api-use", choices=["gemini", "gpt"], default="gemini",
                         help="프롬프트 혼합 생성에 사용할 API (기본값: gemini)")
@@ -275,6 +300,7 @@ def main():
 
     technique_pairs = list(itertools.combinations(prompts_by_technique.keys(), 2))
     print(f"\n[MIX START] Processing {len(technique_pairs)} technique pair(s).")
+    print(f"[MODELS] {' -> '.join(models)}")
 
     for left_technique, right_technique in technique_pairs:
         left_prompts = prompts_by_technique.get(left_technique, [])
@@ -290,7 +316,7 @@ def main():
             try:
                 mixed_prompts = generate_mixed_prompts(
                     client=client,
-                    model=args.model,
+                    models=models,
                     left=left,
                     right=right,
                     char_limit=args.char_limit,
