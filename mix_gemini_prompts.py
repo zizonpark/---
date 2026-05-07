@@ -25,6 +25,11 @@ try:
 except ImportError:
     legacy_genai = None
 
+try:
+    import openai as openai_module
+except ImportError:
+    openai_module = None
+
 from dreadnode_final import (
     TECHNIQUE_MAP,
     load_json_or_jsonl,
@@ -141,17 +146,34 @@ def generate_mixed_prompts(
     num_outputs: int,
 ) -> List[str]:
     instruction = build_mix_instruction(left, right, char_limit, num_outputs)
-    if client["sdk"] == "google-genai":
+    if client["sdk"] == "openai":
+        response = client["client"].chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": instruction}],
+        )
+        text = strip_code_fence(response.choices[0].message.content or "")
+    elif client["sdk"] == "google-genai":
         response = client["client"].models.generate_content(model=model, contents=instruction)
+        text = strip_code_fence(response.text or "")
     else:
         model_client = client["module"].GenerativeModel(model)
         response = model_client.generate_content(instruction)
-    text = strip_code_fence(response.text or "")
+        text = strip_code_fence(response.text or "")
     mixed = [item.strip() for item in text.split(GEMINI_DELIMITER) if item.strip()]
     return mixed[:num_outputs]
 
 
-def get_client(api_key: Optional[str]) -> Dict[str, object]:
+def get_client(api_key: Optional[str], api_use: str = "gemini") -> Dict[str, object]:
+    if api_use == "gpt":
+        if not openai_module:
+            raise RuntimeError("openai 패키지가 설치되지 않았습니다: pip install openai")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다.")
+        return {
+            "sdk": "openai",
+            "client": openai_module.OpenAI(api_key=api_key),
+        }
+
     if not api_key:
         raise RuntimeError("A single Gemini API key is required.")
 
@@ -176,17 +198,23 @@ def get_client(api_key: Optional[str]) -> Dict[str, object]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Use Gemini to synthesize mixed prompts from existing Garak prompt files."
+        description="Use an LLM (Gemini or GPT) to synthesize mixed prompts from existing Garak prompt files."
     )
     parser.add_argument("--prompt-dir", default="garak")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
-    parser.add_argument("--model", default="gemini-2.5-flash")
+    parser.add_argument("--model", default=None,
+                        help="사용할 모델 이름. 기본값: gemini=gemini-2.5-flash, gpt=gpt-4o-mini")
     parser.add_argument("--char-limit", type=int, default=DEFAULT_CHAR_LIMIT)
     parser.add_argument("--prompts-per-technique", type=int, default=DEFAULT_PROMPTS_PER_TECHNIQUE)
     parser.add_argument("--mixed-per-pair", type=int, default=DEFAULT_MIXED_PER_PAIR)
     parser.add_argument("--techniques", nargs="*", default=list(TECHNIQUE_MAP.keys()))
     parser.add_argument("--sleep", type=float, default=1.0)
+    parser.add_argument("--api-use", choices=["gemini", "gpt"], default="gemini",
+                        help="프롬프트 혼합 생성에 사용할 API (기본값: gemini)")
     args = parser.parse_args()
+
+    if args.model is None:
+        args.model = "gpt-4o-mini" if args.api_use == "gpt" else "gemini-2.5-flash"
 
     prompt_dir = Path(args.prompt_dir)
     if not prompt_dir.exists():
@@ -212,8 +240,12 @@ def main():
     }
 
     load_env_file()
-    api_key = os.environ.get("GEMINI_API_KEY")
-    client = get_client(api_key)
+    if args.api_use == "gpt":
+        api_key = os.environ.get("OPENAI_API_KEY")
+    else:
+        api_key = os.environ.get("GEMINI_API_KEY")
+    client = get_client(api_key, api_use=args.api_use)
+    print(f"[API] {args.api_use.upper()} 모드 사용 중 (모델: {args.model})")
     mixed_results = []
 
     technique_pairs = list(itertools.combinations(prompts_by_technique.keys(), 2))
@@ -228,7 +260,7 @@ def main():
 
         for pair_index, (left, right) in enumerate(zip(left_prompts, right_prompts), 1):
             combo_name = f"{left_technique} + {right_technique}"
-            print(f"[Gemini mix] {combo_name} #{pair_index}")
+            print(f"[{args.api_use.upper()} mix] {combo_name} #{pair_index}")
 
             try:
                 mixed_prompts = generate_mixed_prompts(
