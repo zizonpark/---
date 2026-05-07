@@ -44,6 +44,18 @@ DEFAULT_PROMPTS_PER_TECHNIQUE = 3
 DEFAULT_MIXED_PER_PAIR = 1
 GEMINI_DELIMITER = "|||"
 
+# 모델별 1M 토큰당 USD 가격 (input / output)
+MODEL_PRICING = {
+    "gpt-4o-mini":      {"input": 0.150,  "output": 0.600},
+    "gpt-4o":           {"input": 2.500,  "output": 10.000},
+    "gpt-4-turbo":      {"input": 10.000, "output": 30.000},
+    "gpt-3.5-turbo":    {"input": 0.500,  "output": 1.500},
+    "gemini-2.5-flash": {"input": 0.150,  "output": 0.600},
+    "gemini-2.5-pro":   {"input": 1.250,  "output": 10.000},
+    "gemini-1.5-flash": {"input": 0.075,  "output": 0.300},
+    "gemini-1.5-pro":   {"input": 1.250,  "output": 5.000},
+}
+
 
 def find_prompt_file(prompt_dir: Path, probe_name: str) -> Optional[Path]:
     matches = [
@@ -144,6 +156,7 @@ def generate_mixed_prompts(
     right: Dict[str, str],
     char_limit: int,
     num_outputs: int,
+    token_tracker: Dict[str, int],
 ) -> List[str]:
     instruction = build_mix_instruction(left, right, char_limit, num_outputs)
     if client["sdk"] == "openai":
@@ -151,13 +164,24 @@ def generate_mixed_prompts(
             model=model,
             messages=[{"role": "user", "content": instruction}],
         )
+        if response.usage:
+            token_tracker["input"] += response.usage.prompt_tokens
+            token_tracker["output"] += response.usage.completion_tokens
         text = strip_code_fence(response.choices[0].message.content or "")
     elif client["sdk"] == "google-genai":
         response = client["client"].models.generate_content(model=model, contents=instruction)
+        meta = getattr(response, "usage_metadata", None)
+        if meta:
+            token_tracker["input"] += getattr(meta, "prompt_token_count", 0) or 0
+            token_tracker["output"] += getattr(meta, "candidates_token_count", 0) or 0
         text = strip_code_fence(response.text or "")
     else:
         model_client = client["module"].GenerativeModel(model)
         response = model_client.generate_content(instruction)
+        meta = getattr(response, "usage_metadata", None)
+        if meta:
+            token_tracker["input"] += getattr(meta, "prompt_token_count", 0) or 0
+            token_tracker["output"] += getattr(meta, "candidates_token_count", 0) or 0
         text = strip_code_fence(response.text or "")
     mixed = [item.strip() for item in text.split(GEMINI_DELIMITER) if item.strip()]
     return mixed[:num_outputs]
@@ -247,6 +271,7 @@ def main():
     client = get_client(api_key, api_use=args.api_use)
     print(f"[API] {args.api_use.upper()} 모드 사용 중 (모델: {args.model})")
     mixed_results = []
+    token_tracker: Dict[str, int] = {"input": 0, "output": 0}
 
     technique_pairs = list(itertools.combinations(prompts_by_technique.keys(), 2))
     print(f"\n[MIX START] Processing {len(technique_pairs)} technique pair(s).")
@@ -270,6 +295,7 @@ def main():
                     right=right,
                     char_limit=args.char_limit,
                     num_outputs=args.mixed_per_pair,
+                    token_tracker=token_tracker,
                 )
             except Exception as e:
                 mixed_results.append({
@@ -299,6 +325,28 @@ def main():
 
     save_json(Path(args.output), mixed_results)
     print(f"\n[SAVED] {len(mixed_results)} mixed prompt record(s): {args.output}")
+
+    total_input = token_tracker["input"]
+    total_output = token_tracker["output"]
+    total_tokens = total_input + total_output
+    pricing = MODEL_PRICING.get(args.model)
+
+    print("\n" + "=" * 60)
+    print("[DEBUG] 토큰 사용량 및 비용")
+    print(f"  모델       : {args.model}")
+    print(f"  입력 토큰  : {total_input:,}")
+    print(f"  출력 토큰  : {total_output:,}")
+    print(f"  합계 토큰  : {total_tokens:,}")
+    if pricing:
+        input_cost  = total_input  / 1_000_000 * pricing["input"]
+        output_cost = total_output / 1_000_000 * pricing["output"]
+        total_cost  = input_cost + output_cost
+        print(f"  입력 비용  : ${input_cost:.6f}  (${pricing['input']:.3f} / 1M)")
+        print(f"  출력 비용  : ${output_cost:.6f}  (${pricing['output']:.3f} / 1M)")
+        print(f"  총 비용    : ${total_cost:.6f}")
+    else:
+        print(f"  비용       : '{args.model}' 가격 정보 없음 (MODEL_PRICING에 직접 추가하세요)")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
