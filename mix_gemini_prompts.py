@@ -38,6 +38,15 @@ DEFAULT_CHAR_LIMIT = 2048
 DEFAULT_PROMPTS_PER_TECHNIQUE = 3
 DEFAULT_MIXED_PER_PAIR = 1
 GEMINI_DELIMITER = "|||"
+RETRYABLE_ERROR_TOKENS = (
+    "429",
+    "503",
+    "RESOURCE_EXHAUSTED",
+    "UNAVAILABLE",
+    "high demand",
+    "rate limit",
+    "temporarily",
+)
 
 
 def find_prompt_file(prompt_dir: Path, probe_name: str) -> Optional[Path]:
@@ -132,23 +141,55 @@ def build_mix_instruction(
     )
 
 
+def is_retryable_gemini_error(error: Exception) -> bool:
+    message = str(error)
+    return any(token.lower() in message.lower() for token in RETRYABLE_ERROR_TOKENS)
+
+
+def generate_content(client: Dict[str, object], model: str, instruction: str):
+    if client["sdk"] == "google-genai":
+        return client["client"].models.generate_content(model=model, contents=instruction)
+
+    model_client = client["module"].GenerativeModel(model)
+    return model_client.generate_content(instruction)
+
+
 def generate_mixed_prompts(
     client: Dict[str, object],
-    model: str,
+    models: List[str],
     left: Dict[str, str],
     right: Dict[str, str],
     char_limit: int,
     num_outputs: int,
+    retries: int,
+    retry_delay: float,
+    retry_backoff: float,
 ) -> List[str]:
     instruction = build_mix_instruction(left, right, char_limit, num_outputs)
-    if client["sdk"] == "google-genai":
-        response = client["client"].models.generate_content(model=model, contents=instruction)
-    else:
-        model_client = client["module"].GenerativeModel(model)
-        response = model_client.generate_content(instruction)
-    text = strip_code_fence(response.text or "")
-    mixed = [item.strip() for item in text.split(GEMINI_DELIMITER) if item.strip()]
-    return mixed[:num_outputs]
+    retries = max(1, retries)
+    delay = retry_delay
+    last_error = None
+
+    for attempt in range(1, retries + 1):
+        for model in models:
+            try:
+                response = generate_content(client, model, instruction)
+                text = strip_code_fence(response.text or "")
+                mixed = [item.strip() for item in text.split(GEMINI_DELIMITER) if item.strip()]
+                return mixed[:num_outputs]
+            except Exception as e:
+                last_error = e
+                if not is_retryable_gemini_error(e):
+                    raise
+
+                print(f"  [RETRYABLE] {model} attempt {attempt}/{retries}: {e}")
+
+        if attempt < retries:
+            print(f"  [WAIT] Gemini is busy; retrying in {delay:.1f}s...")
+            time.sleep(delay)
+            delay *= retry_backoff
+
+    raise last_error
 
 
 def get_client(api_key: Optional[str]) -> Dict[str, object]:
@@ -181,10 +222,14 @@ def main():
     parser.add_argument("--prompt-dir", default="garak")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     parser.add_argument("--model", default="gemini-2.5-flash")
+    parser.add_argument("--fallback-models", nargs="*", default=[])
     parser.add_argument("--char-limit", type=int, default=DEFAULT_CHAR_LIMIT)
     parser.add_argument("--prompts-per-technique", type=int, default=DEFAULT_PROMPTS_PER_TECHNIQUE)
     parser.add_argument("--mixed-per-pair", type=int, default=DEFAULT_MIXED_PER_PAIR)
     parser.add_argument("--techniques", nargs="*", default=list(TECHNIQUE_MAP.keys()))
+    parser.add_argument("--retries", type=int, default=5)
+    parser.add_argument("--retry-delay", type=float, default=15.0)
+    parser.add_argument("--retry-backoff", type=float, default=1.8)
     parser.add_argument("--sleep", type=float, default=1.0)
     args = parser.parse_args()
 
@@ -215,9 +260,11 @@ def main():
     api_key = os.environ.get("GEMINI_API_KEY")
     client = get_client(api_key)
     mixed_results = []
+    models = [args.model] + [model for model in args.fallback_models if model != args.model]
 
     technique_pairs = list(itertools.combinations(prompts_by_technique.keys(), 2))
     print(f"\n[MIX START] Processing {len(technique_pairs)} technique pair(s).")
+    print(f"[MODELS] {' -> '.join(models)}")
 
     for left_technique, right_technique in technique_pairs:
         left_prompts = prompts_by_technique.get(left_technique, [])
@@ -233,11 +280,14 @@ def main():
             try:
                 mixed_prompts = generate_mixed_prompts(
                     client=client,
-                    model=args.model,
+                    models=models,
                     left=left,
                     right=right,
                     char_limit=args.char_limit,
                     num_outputs=args.mixed_per_pair,
+                    retries=args.retries,
+                    retry_delay=args.retry_delay,
+                    retry_backoff=args.retry_backoff,
                 )
             except Exception as e:
                 mixed_results.append({
