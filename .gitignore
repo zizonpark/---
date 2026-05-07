@@ -8,3 +8,4 @@ sample_responsess.json
 gemini_modified_prompts.json
 
 jailbreak_analysis_report.pdf
+.venv/

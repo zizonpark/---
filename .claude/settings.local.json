@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where python *)",
+      "Bash(where python3 *)",
+      "Read(//c/Users/Admin/AppData/Local/Programs/**)",
+      "Bash(reg query *)",
+      "Bash(~/.pyenv/pyenv-win/bin/pyenv.bat versions *)",
+      "Bash(~/.pyenv/pyenv-win/bin/pyenv versions *)"
+    ]
+  }
+}
