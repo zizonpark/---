@@ -25,6 +25,11 @@ try:
 except ImportError:
     legacy_genai = None
 
+try:
+    import openai as openai_module
+except ImportError:
+    openai_module = None
+
 from dreadnode_final import (
     TECHNIQUE_MAP,
     load_json_or_jsonl,
@@ -47,6 +52,18 @@ RETRYABLE_ERROR_TOKENS = (
     "rate limit",
     "temporarily",
 )
+
+# 모델별 1M 토큰당 USD 가격 (input / output)
+MODEL_PRICING = {
+    "gpt-4o-mini":      {"input": 0.150,  "output": 0.600},
+    "gpt-4o":           {"input": 2.500,  "output": 10.000},
+    "gpt-4-turbo":      {"input": 10.000, "output": 30.000},
+    "gpt-3.5-turbo":    {"input": 0.500,  "output": 1.500},
+    "gemini-2.5-flash": {"input": 0.150,  "output": 0.600},
+    "gemini-2.5-pro":   {"input": 1.250,  "output": 10.000},
+    "gemini-1.5-flash": {"input": 0.075,  "output": 0.300},
+    "gemini-1.5-pro":   {"input": 1.250,  "output": 5.000},
+}
 
 
 def find_prompt_file(prompt_dir: Path, probe_name: str) -> Optional[Path]:
@@ -161,38 +178,48 @@ def generate_mixed_prompts(
     right: Dict[str, str],
     char_limit: int,
     num_outputs: int,
-    retries: int,
-    retry_delay: float,
-    retry_backoff: float,
+    token_tracker: Dict[str, int],
 ) -> List[str]:
     instruction = build_mix_instruction(left, right, char_limit, num_outputs)
-    retries = max(1, retries)
-    delay = retry_delay
-    last_error = None
+    if client["sdk"] == "openai":
+        response = client["client"].chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": instruction}],
+        )
+        if response.usage:
+            token_tracker["input"] += response.usage.prompt_tokens
+            token_tracker["output"] += response.usage.completion_tokens
+        text = strip_code_fence(response.choices[0].message.content or "")
+    elif client["sdk"] == "google-genai":
+        response = client["client"].models.generate_content(model=model, contents=instruction)
+        meta = getattr(response, "usage_metadata", None)
+        if meta:
+            token_tracker["input"] += getattr(meta, "prompt_token_count", 0) or 0
+            token_tracker["output"] += getattr(meta, "candidates_token_count", 0) or 0
+        text = strip_code_fence(response.text or "")
+    else:
+        model_client = client["module"].GenerativeModel(model)
+        response = model_client.generate_content(instruction)
+        meta = getattr(response, "usage_metadata", None)
+        if meta:
+            token_tracker["input"] += getattr(meta, "prompt_token_count", 0) or 0
+            token_tracker["output"] += getattr(meta, "candidates_token_count", 0) or 0
+        text = strip_code_fence(response.text or "")
+    mixed = [item.strip() for item in text.split(GEMINI_DELIMITER) if item.strip()]
+    return mixed[:num_outputs]
 
-    for attempt in range(1, retries + 1):
-        for model in models:
-            try:
-                response = generate_content(client, model, instruction)
-                text = strip_code_fence(response.text or "")
-                mixed = [item.strip() for item in text.split(GEMINI_DELIMITER) if item.strip()]
-                return mixed[:num_outputs]
-            except Exception as e:
-                last_error = e
-                if not is_retryable_gemini_error(e):
-                    raise
 
-                print(f"  [RETRYABLE] {model} attempt {attempt}/{retries}: {e}")
+def get_client(api_key: Optional[str], api_use: str = "gemini") -> Dict[str, object]:
+    if api_use == "gpt":
+        if not openai_module:
+            raise RuntimeError("openai 패키지가 설치되지 않았습니다: pip install openai")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다.")
+        return {
+            "sdk": "openai",
+            "client": openai_module.OpenAI(api_key=api_key),
+        }
 
-        if attempt < retries:
-            print(f"  [WAIT] Gemini is busy; retrying in {delay:.1f}s...")
-            time.sleep(delay)
-            delay *= retry_backoff
-
-    raise last_error
-
-
-def get_client(api_key: Optional[str]) -> Dict[str, object]:
     if not api_key:
         raise RuntimeError("A single Gemini API key is required.")
 
@@ -217,12 +244,12 @@ def get_client(api_key: Optional[str]) -> Dict[str, object]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Use Gemini to synthesize mixed prompts from existing Garak prompt files."
+        description="Use an LLM (Gemini or GPT) to synthesize mixed prompts from existing Garak prompt files."
     )
     parser.add_argument("--prompt-dir", default="garak")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
-    parser.add_argument("--model", default="gemini-2.5-flash")
-    parser.add_argument("--fallback-models", nargs="*", default=[])
+    parser.add_argument("--model", default=None,
+                        help="사용할 모델 이름. 기본값: gemini=gemini-2.5-flash, gpt=gpt-4o-mini")
     parser.add_argument("--char-limit", type=int, default=DEFAULT_CHAR_LIMIT)
     parser.add_argument("--prompts-per-technique", type=int, default=DEFAULT_PROMPTS_PER_TECHNIQUE)
     parser.add_argument("--mixed-per-pair", type=int, default=DEFAULT_MIXED_PER_PAIR)
@@ -231,7 +258,12 @@ def main():
     parser.add_argument("--retry-delay", type=float, default=15.0)
     parser.add_argument("--retry-backoff", type=float, default=1.8)
     parser.add_argument("--sleep", type=float, default=1.0)
+    parser.add_argument("--api-use", choices=["gemini", "gpt"], default="gemini",
+                        help="프롬프트 혼합 생성에 사용할 API (기본값: gemini)")
     args = parser.parse_args()
+
+    if args.model is None:
+        args.model = "gpt-4o-mini" if args.api_use == "gpt" else "gemini-2.5-flash"
 
     prompt_dir = Path(args.prompt_dir)
     if not prompt_dir.exists():
@@ -257,10 +289,14 @@ def main():
     }
 
     load_env_file()
-    api_key = os.environ.get("GEMINI_API_KEY")
-    client = get_client(api_key)
+    if args.api_use == "gpt":
+        api_key = os.environ.get("OPENAI_API_KEY")
+    else:
+        api_key = os.environ.get("GEMINI_API_KEY")
+    client = get_client(api_key, api_use=args.api_use)
+    print(f"[API] {args.api_use.upper()} 모드 사용 중 (모델: {args.model})")
     mixed_results = []
-    models = [args.model] + [model for model in args.fallback_models if model != args.model]
+    token_tracker: Dict[str, int] = {"input": 0, "output": 0}
 
     technique_pairs = list(itertools.combinations(prompts_by_technique.keys(), 2))
     print(f"\n[MIX START] Processing {len(technique_pairs)} technique pair(s).")
@@ -275,7 +311,7 @@ def main():
 
         for pair_index, (left, right) in enumerate(zip(left_prompts, right_prompts), 1):
             combo_name = f"{left_technique} + {right_technique}"
-            print(f"[Gemini mix] {combo_name} #{pair_index}")
+            print(f"[{args.api_use.upper()} mix] {combo_name} #{pair_index}")
 
             try:
                 mixed_prompts = generate_mixed_prompts(
@@ -285,9 +321,7 @@ def main():
                     right=right,
                     char_limit=args.char_limit,
                     num_outputs=args.mixed_per_pair,
-                    retries=args.retries,
-                    retry_delay=args.retry_delay,
-                    retry_backoff=args.retry_backoff,
+                    token_tracker=token_tracker,
                 )
             except Exception as e:
                 mixed_results.append({
@@ -317,6 +351,28 @@ def main():
 
     save_json(Path(args.output), mixed_results)
     print(f"\n[SAVED] {len(mixed_results)} mixed prompt record(s): {args.output}")
+
+    total_input = token_tracker["input"]
+    total_output = token_tracker["output"]
+    total_tokens = total_input + total_output
+    pricing = MODEL_PRICING.get(args.model)
+
+    print("\n" + "=" * 60)
+    print("[DEBUG] 토큰 사용량 및 비용")
+    print(f"  모델       : {args.model}")
+    print(f"  입력 토큰  : {total_input:,}")
+    print(f"  출력 토큰  : {total_output:,}")
+    print(f"  합계 토큰  : {total_tokens:,}")
+    if pricing:
+        input_cost  = total_input  / 1_000_000 * pricing["input"]
+        output_cost = total_output / 1_000_000 * pricing["output"]
+        total_cost  = input_cost + output_cost
+        print(f"  입력 비용  : ${input_cost:.6f}  (${pricing['input']:.3f} / 1M)")
+        print(f"  출력 비용  : ${output_cost:.6f}  (${pricing['output']:.3f} / 1M)")
+        print(f"  총 비용    : ${total_cost:.6f}")
+    else:
+        print(f"  비용       : '{args.model}' 가격 정보 없음 (MODEL_PRICING에 직접 추가하세요)")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
