@@ -1,1 +1,11 @@
+.env
+__pycache__/
+*.py[cod]
+
+mixed_prompts.json
+responses.json
+sample_responsess.json
+gemini_modified_prompts.json
+
+jailbreak_analysis_report.pdf
 .venv/
