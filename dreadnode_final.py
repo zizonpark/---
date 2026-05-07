@@ -39,10 +39,7 @@ try:
 except ImportError:
     openai_module = None
 
-# 제공받은 20개의 Gemini API 키 목록 (자동 전환 용도)
-GEMINI_API_KEYS =[
-    "AIzaSyAhDDYi_0fGBY6A1D3HKUChNh7YgzE-anw"
-]
+GEMINI_API_KEYS: List[str] = []
 
 class GeminiKeyManager:
     """Manage Gemini API key rotation."""
@@ -60,7 +57,7 @@ class GeminiKeyManager:
             return False
         self.current_idx += 1
         if self.current_idx >= len(self.keys):
-            print("\n[경고] 준비된 20개의 API 키를 모두 사용했습니다! 첫 번째 키로 돌아갑니다. (잠시 후 다시 시도합니다.)")
+            print(f"\n[경고] 준비된 {len(self.keys)}개의 API 키를 모두 사용했습니다! 첫 번째 키로 돌아갑니다. (잠시 후 다시 시도합니다.)")
             self.current_idx = 0
             return False
         print(f"\n[API 키 자동 교체] {self.current_idx}번 키가 만료되었습니다. 다음 키({self.current_idx + 1}/{len(self.keys)})로 전환하여 계속 진행합니다.")
@@ -96,6 +93,33 @@ def pretty(obj):
         return json.dumps(obj, ensure_ascii=False, indent=2)
     except Exception:
         return str(obj)
+
+
+def load_env_file(path: Path = Path(".env")) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def get_gemini_api_keys() -> List[str]:
+    keys = []
+    if os.environ.get("GEMINI_API_KEY"):
+        keys.append(os.environ["GEMINI_API_KEY"])
+    if os.environ.get("GEMINI_API_KEYS"):
+        keys.extend(
+            key.strip()
+            for key in os.environ["GEMINI_API_KEYS"].split(",")
+            if key.strip()
+        )
+    return list(dict.fromkeys(keys))
 
 def run_garak(target_type: str, target_name: str, probes: str, extra_args: List[str]) -> Optional[Path]:
     cmd =[
@@ -429,148 +453,6 @@ def generate_variations(
         return generate_variations_with_gpt(prompt, api_key, task, char_limit, num_variations, gpt_model)
     return generate_variations_with_gemini(prompt, api_key, task, char_limit, num_variations)
 
-def post_prompts_to_endpoint(
-    extracted: List[Dict[str, Optional[str]]],
-    endpoint: str,
-    current_limit: int,
-    repeat_count: int,
-    key_manager: GeminiKeyManager,
-    api_key_header: str = "X-API-Key",
-    data_field: str = "data",
-    timeout: int = 60,
-    task: Optional[str] = None
-) -> Tuple[List[dict], int, List[dict]]:
-    
-    sess = requests.Session()
-    server_api_key = os.environ.get("DREADNODE_API_KEY")
-    if server_api_key:
-        sess.headers.update({api_key_header: server_api_key})
-
-    out =[]
-    gemini_saved_prompts =[]
-
-    for i, item in enumerate(extracted, 1):
-        original_prompt = item.get("prompt")
-        probe_name = item.get("probe_name")
-
-        if not original_prompt:
-            continue
-            
-        print("-" * 60)
-        print(f"[Prompt {i}] source_len={len(original_prompt)} repeat={repeat_count}")
-
-        variations_needed = repeat_count
-        gemini_api_attempts = 0
-        max_gemini_attempts = 6 
-        
-        while variations_needed > 0 and gemini_api_attempts < max_gemini_attempts:
-            variations =[]
-            
-            if task or len(original_prompt) > current_limit or repeat_count > 1:
-                gemini_api_key = key_manager.get_current_key()
-                if not genai or not gemini_api_key:
-                    print("[경고] Gemini 설정 또는 API 키가 없어 프롬프트 수정을 건너뜁니다.")
-                    break
-                    
-                gemini_api_attempts += 1
-                try:
-                    print(f"[Gemini] {variations_needed}개의 변형 프롬프트 생성을 요청 중... (제한: {current_limit}자, 시도: {gemini_api_attempts}/{max_gemini_attempts})")
-                    variations = generate_variations_with_gemini(original_prompt, gemini_api_key, task, current_limit, variations_needed)
-                    print(f"[Gemini] {len(variations)}개의 변형 프롬프트 생성 완료!")
-                except Exception as e:
-                    err_str = str(e)
-                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota" in err_str:
-                        switched = key_manager.switch_to_next_key()
-                        if not switched:
-                            print("[Rate Limit] 모든 키를 사용했습니다. 15초 대기 후 다시 시도합니다...")
-                            time.sleep(15)
-                        else:
-                            gemini_api_attempts -= 1
-                            time.sleep(1) 
-                    else:
-                        print(f"[Gemini 생성 실패] {err_str}")
-                        time.sleep(3)
-                    continue
-            else:
-                variations =[original_prompt]
-                gemini_api_attempts = max_gemini_attempts 
-
-            if not variations:
-                break
-
-            new_limit_detected = False
-            
-            for var_idx, prompt in enumerate(variations, 1):
-                if variations_needed <= 0:
-                    break
-                    
-                print(f"\n  sending {repeat_count - variations_needed + 1}/{repeat_count}, limit={current_limit}")
-                
-                gemini_saved_prompts.append({
-                    "endpoint": endpoint,
-                    "original_garak_probe": probe_name,
-                    "gemini_modified_prompt": prompt,
-                    "length": len(prompt)
-                })
-                
-                if len(prompt) > current_limit:
-                    print(f"[스킵] 생성된 프롬프트({len(prompt)}자)가 제한({current_limit}자)을 초과했습니다. (재생성 예정)")
-                    continue
-
-                try:
-                    resp = sess.post(endpoint, json={data_field: prompt}, timeout=timeout)
-                    raw_text = resp.text
-                    try:
-                        body = resp.json()
-                    except Exception:
-                        body = {"raw_text": raw_text}
-
-                    print(f"  status={resp.status_code}")
-                    
-                    if resp.status_code == 400:
-                        msg = body.get("message", "")
-                        match = re.search(r"at most (\d+) characters", msg, re.IGNORECASE)
-                        
-                        if match:
-                            new_limit = int(match.group(1))
-                            if new_limit < current_limit:
-                                print(f"  [limit] server reported stricter limit: {new_limit}")
-                                current_limit = new_limit
-                                new_limit_detected = True
-                                break 
-
-                    out.append({
-                        "endpoint": endpoint,
-                        "probe_name": probe_name,
-                        "prompt": prompt,
-                        "status_code": resp.status_code,
-                        "response": body,
-                    })
-                    variations_needed -= 1
-
-                except Exception as e:
-                    print(f"  [전송 실패] {e}")
-                    out.append({
-                        "endpoint": endpoint,
-                        "probe_name": probe_name,
-                        "prompt": prompt,
-                        "error": str(e),
-                    })
-                    variations_needed -= 1
-                    
-            if new_limit_detected:
-                print(f"  [재시도] 변경된 {current_limit}자 제한에 맞춰 남은 {variations_needed}개의 프롬프트를 다시 생성합니다.")
-                time.sleep(2)
-                continue
-                
-        if variations_needed > 0:
-            print(f"\n[경고] 최대 재시도 횟수({max_gemini_attempts}회)를 초과하여, 남은 {variations_needed}개의 프롬프트 생성을 포기합니다.")
-            
-        time.sleep(1) 
-
-    return out, current_limit, gemini_saved_prompts
-
-
 def get_alignment_arena_csrf(sess: "requests.Session", endpoint: str, timeout: int) -> str:
     resp = sess.get(endpoint, timeout=timeout)
     resp.raise_for_status()
@@ -689,6 +571,149 @@ def run_sample_injection_test(
         time.sleep(1)
 
     save_json(output_path, results)
+
+
+def run_mistral_gate_pipeline(
+    args,
+    endpoints: List[str],
+) -> None:
+    from mistral_gate import (
+        ConfusionMatrixTracker,
+        MistralGate,
+        load_after_input,
+        validate_after_record,
+    )
+
+    if not args.after_input:
+        raise RuntimeError("--use-mistral-gate requires --after-input.")
+
+    records = [
+        validate_after_record(record, index)
+        for index, record in enumerate(load_after_input(Path(args.after_input)), 1)
+    ]
+    print(f"[Mistral Gate] loaded {len(records)} after-input record(s).")
+
+    gate = MistralGate(
+        model_dir=Path(args.mistral_model_dir),
+        backend=args.mistral_backend,
+        device=args.mistral_device,
+        max_new_tokens=args.mistral_max_new_tokens,
+        temperature=args.mistral_temperature,
+        retries=args.mistral_retries,
+        retry_delay=args.mistral_retry_delay,
+    )
+    tracker = ConfusionMatrixTracker()
+    sess = requests.Session()
+    responses_after = []
+    normalized_prompts = []
+    previous_probe = None
+
+    current_limit = 2048 if args.platform == "alignmentarena" else 250
+
+    for idx, record in enumerate(records, 1):
+        probe_name = record["probe_name"]
+        original_prompt = prompt_to_text(record.get("prompt")) or ""
+        actual = int(record["is_jailbreak"])
+
+        if previous_probe is not None and probe_name != previous_probe:
+            tracker.print_probe(previous_probe)
+        previous_probe = probe_name
+
+        print("-" * 70)
+        print(f"[Mistral Gate] {idx}/{len(records)} probe={probe_name} actual={actual}")
+
+        try:
+            predicted, classifier_raw = gate.classify(original_prompt)
+        except Exception as e:
+            predicted = 1
+            classifier_raw = str(e)
+            print(f"[Mistral classify error] {e}")
+
+        tracker.update(probe_name, actual, predicted)
+        metrics_snapshot = tracker.snapshot(probe_name)
+
+        normalized_prompt = None
+        normalization_raw = None
+        used_normalization = predicted == 1
+
+        if used_normalization:
+            try:
+                normalized_prompt, normalization_raw = gate.normalize(original_prompt)
+            except Exception as e:
+                normalized_prompt = original_prompt
+                normalization_raw = str(e)
+                print(f"[Mistral normalize error] {e}")
+            sent_prompt_base = normalized_prompt or original_prompt
+            normalized_prompts.append({
+                "probe_name": probe_name,
+                "techniques_used": record.get("techniques_used"),
+                "original_prompt": original_prompt,
+                "normalized_prompt": sent_prompt_base,
+                "mistral_classifier_raw": classifier_raw,
+                "mistral_normalization_raw": normalization_raw,
+            })
+        else:
+            sent_prompt_base = original_prompt
+
+        for endpoint in endpoints:
+            sent_prompt = sent_prompt_base
+            if args.platform == "alignmentarena":
+                sent_prompt = ensure_alignment_arena_prompt(sent_prompt, current_limit)
+
+            result = {
+                "endpoint": endpoint,
+                "platform": args.platform,
+                "probe_name": probe_name,
+                "techniques_used": record.get("techniques_used"),
+                "batch_source": record.get("batch_source"),
+                "source_probes": record.get("source_probes"),
+                "source_files": record.get("source_files"),
+                "mixed_index": record.get("mixed_index"),
+                "original_prompt": original_prompt,
+                "actual_is_jailbreak": actual,
+                "mistral_prediction": predicted,
+                "mistral_classifier_raw": classifier_raw,
+                "used_normalization": used_normalization,
+                "normalized_prompt": normalized_prompt,
+                "mistral_normalization_raw": normalization_raw,
+                "sent_prompt": sent_prompt,
+                "mistral_metrics_snapshot": metrics_snapshot,
+                "error": None,
+            }
+
+            try:
+                status_code, body = post_single_prompt(
+                    sess=sess,
+                    endpoint=endpoint,
+                    prompt=sent_prompt,
+                    platform=args.platform,
+                    api_key_header=args.api_key_header,
+                    data_field=args.data_field,
+                    timeout=args.timeout,
+                )
+                print(f"  endpoint={endpoint} status={status_code} pred={predicted}")
+                result.update({
+                    "status_code": status_code,
+                    "response": body,
+                })
+            except Exception as e:
+                print(f"  [after send error] {e}")
+                result["error"] = str(e)
+
+            responses_after.append(result)
+            save_json(Path(args.responses_after_json), responses_after)
+
+    if previous_probe is not None:
+        tracker.print_probe(previous_probe)
+    tracker.print_global()
+
+    save_json(Path(args.responses_after_json), responses_after)
+    save_json(Path(args.mistral_confusion_json), tracker.export())
+    save_json(Path(args.mistral_normalized_prompts_json), normalized_prompts)
+
+    print(f"\n[저장 완료] after 응답 결과: {args.responses_after_json}")
+    print(f"[저장 완료] Mistral confusion matrix: {args.mistral_confusion_json}")
+    print(f"[저장 완료] Mistral 정규화 프롬프트: {args.mistral_normalized_prompts_json}")
 
 
 def post_prompts_to_endpoint(
@@ -912,30 +937,43 @@ def main():
     parser.add_argument("--data-field", default="data")
     parser.add_argument("--task", default=None, type=str)
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--api-use", choices=["gemini", "gpt"], default="gemini",
                         help="프롬프트 변형 생성에 사용할 API (기본값: gemini)")
     parser.add_argument("--gpt-model", default="gpt-4o-mini",
                         help="GPT 사용 시 모델 이름 (기본값: gpt-4o-mini)")
+    parser.add_argument("--use-mistral-gate", action="store_true")
+    parser.add_argument("--after-input", default=None)
+    parser.add_argument("--responses-after-json", default="responses_after.json")
+    parser.add_argument("--mistral-model-dir", default="mistral-7B-v0.1")
+    parser.add_argument("--mistral-backend", choices=["auto", "mistral-inference", "transformers", "heuristic"], default="auto")
+    parser.add_argument("--mistral-max-new-tokens", type=int, default=64)
+    parser.add_argument("--mistral-temperature", type=float, default=0.0)
+    parser.add_argument("--mistral-device", default="auto")
+    parser.add_argument("--mistral-retries", type=int, default=2)
+    parser.add_argument("--mistral-retry-delay", type=float, default=1.0)
+    parser.add_argument("--mistral-confusion-json", default="mistral_confusion_matrices.json")
+    parser.add_argument("--mistral-normalized-prompts-json", default="mistral_normalized_prompts.json")
 
     args = parser.parse_args()
+    load_env_file()
 
     if not args.send_endpoint:
         print("오류: --send-endpoint 파라미터가 필요합니다.")
         sys.exit(1)
 
     gpt_api_key = os.environ.get("OPENAI_API_KEY")
-    if args.api_use == "gpt":
-        if not openai_module:
-            print("오류: openai 패키지가 설치되지 않았습니다. pip install openai")
-            sys.exit(1)
-        if not gpt_api_key:
-            print("오류: OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
-            sys.exit(1)
-        print(f"[API] GPT 모드 사용 중 (모델: {args.gpt_model})")
-    else:
-        print(f"[API] Gemini 모드 사용 중")
-
-    key_manager = GeminiKeyManager(GEMINI_API_KEYS)
+    if not args.use_mistral_gate:
+        if args.api_use == "gpt":
+            if not openai_module:
+                print("오류: openai 패키지가 설치되지 않았습니다. pip install openai")
+                sys.exit(1)
+            if not gpt_api_key:
+                print("오류: OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
+                sys.exit(1)
+            print(f"[API] GPT 모드 사용 중 (모델: {args.gpt_model})")
+        else:
+            print("[API] Gemini 모드 사용 중")
 
     endpoints =[]
     if args.platform == "alignmentarena":
@@ -945,6 +983,13 @@ def main():
     else:
         suffixes =[1, 2, 3, 2]
         endpoints =[f"https://{args.send_endpoint}{i}.platform.dreadnode.io/score" for i in suffixes]
+
+    if args.use_mistral_gate:
+        run_mistral_gate_pipeline(args, endpoints)
+        return
+
+    gemini_api_keys = get_gemini_api_keys()
+    key_manager = GeminiKeyManager(gemini_api_keys)
 
     run_sample_injection_test(
         endpoint=endpoints[0],
@@ -990,7 +1035,7 @@ def main():
 
     print(f"\n[2단계] 총 {len(combinations)}가지 Garak 기법 조합 테스트를 준비합니다.")
     if args.api_use == "gemini":
-        print(f"    (사용 가능한 Gemini API 키 {len(GEMINI_API_KEYS)}개 대기 중)\n")
+        print(f"    (사용 가능한 Gemini API 키 {len(gemini_api_keys)}개 대기 중)\n")
     else:
         print(f"    (GPT API 사용 중)\n")
 
@@ -1046,6 +1091,7 @@ def main():
                 api_use=args.api_use,
                 gpt_api_key=gpt_api_key,
                 gpt_model=args.gpt_model,
+                timeout=args.timeout,
             )
             
             for g in gemini_saved:

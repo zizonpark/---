@@ -1,12 +1,27 @@
 import json
+import os
 import sys
-import requests
+from pathlib import Path
 
-DREADNODE_API_KEY = "QcBlBGzVlFYNiHwhUgksyWKjD3aoTMnm"
+import requests
 
 CHALLENGE = "puppeteer1"
 CRUCIBLE_URL = "https://platform.dreadnode.io"
 CHALLENGE_URL = "https://puppeteer1.platform.dreadnode.io"
+
+
+def load_env_file(path: Path = Path(".env")) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 class CrucibleClient:
@@ -83,8 +98,14 @@ def print_help():
 
 
 def main():
+    load_env_file()
+    api_key = os.environ.get("DREADNODE_API_KEY", "").strip()
+    if not api_key:
+        print("오류: DREADNODE_API_KEY 환경변수 또는 .env 값이 필요합니다.")
+        sys.exit(1)
+
     client = CrucibleClient(
-        api_key=DREADNODE_API_KEY,
+        api_key=api_key,
         challenge=CHALLENGE,
         crucible_url=CRUCIBLE_URL,
         challenge_url=CHALLENGE_URL,

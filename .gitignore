@@ -2,7 +2,21 @@
 __pycache__/
 *.py[cod]
 
-
-
 jailbreak_analysis_report.pdf
 .venv/
+google fuck ai.txt
+
+# Local run outputs
+responses*.json
+sample_responsess.json
+gemini_modified_prompts.json
+mixed_prompts.json
+mistral_confusion_matrices.json
+mistral_normalized_prompts.json
+
+# Generated reports/assets
+arrayz1.npy
+arrayz1_views/
+
+# Local model weights/checkpoints
+mistral-7B-v0.1/

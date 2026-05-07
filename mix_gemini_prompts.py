@@ -1,5 +1,5 @@
 """
-Generate genuinely mixed prompts from existing Garak prompt files using Gemini.
+Generate genuinely mixed prompts from existing Garak prompt files using Gemini or GPT.
 
 This script only reads the existing prompt files. It writes mixed prompts to a
 separate JSON output file and does not modify files under garak/.
@@ -12,6 +12,7 @@ import itertools
 import os
 import re
 import time
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -20,10 +21,14 @@ try:
 except ImportError:
     google_genai = None
 
-try:
-    import google.generativeai as legacy_genai
-except ImportError:
-    legacy_genai = None
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", FutureWarning)
+    warnings.filterwarnings("ignore", category=FutureWarning, module=r"google\.generativeai.*")
+    warnings.filterwarnings("ignore", message=r".*google\.generativeai.*", category=FutureWarning)
+    try:
+        import google.generativeai as legacy_genai
+    except ImportError:
+        legacy_genai = None
 
 try:
     import openai as openai_module
@@ -53,16 +58,16 @@ RETRYABLE_ERROR_TOKENS = (
     "temporarily",
 )
 
-# 모델별 1M 토큰당 USD 가격 (input / output)
+# Model pricing per 1M tokens in USD (input / output).
 MODEL_PRICING = {
-    "gpt-4o-mini":      {"input": 0.150,  "output": 0.600},
-    "gpt-4o":           {"input": 2.500,  "output": 10.000},
-    "gpt-4-turbo":      {"input": 10.000, "output": 30.000},
-    "gpt-3.5-turbo":    {"input": 0.500,  "output": 1.500},
-    "gemini-2.5-flash": {"input": 0.150,  "output": 0.600},
-    "gemini-2.5-pro":   {"input": 1.250,  "output": 10.000},
-    "gemini-1.5-flash": {"input": 0.075,  "output": 0.300},
-    "gemini-1.5-pro":   {"input": 1.250,  "output": 5.000},
+    "gpt-4o-mini": {"input": 0.150, "output": 0.600},
+    "gpt-4o": {"input": 2.500, "output": 10.000},
+    "gpt-4-turbo": {"input": 10.000, "output": 30.000},
+    "gpt-3.5-turbo": {"input": 0.500, "output": 1.500},
+    "gemini-2.5-flash": {"input": 0.150, "output": 0.600},
+    "gemini-2.5-pro": {"input": 1.250, "output": 10.000},
+    "gemini-1.5-flash": {"input": 0.075, "output": 0.300},
+    "gemini-1.5-pro": {"input": 1.250, "output": 5.000},
 }
 
 
@@ -112,7 +117,7 @@ def load_prompts_for_probe(
 
 
 def strip_code_fence(text: str) -> str:
-    text = text.strip()
+    text = (text or "").strip()
     text = re.sub(r"^```(?:text|json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     return text.strip()
@@ -122,7 +127,7 @@ def load_env_file(path: Path = Path(".env")) -> None:
     if not path.exists():
         return
 
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -158,63 +163,84 @@ def build_mix_instruction(
     )
 
 
-def is_retryable_gemini_error(error: Exception) -> bool:
+def is_retryable_llm_error(error: Exception) -> bool:
     message = str(error)
     return any(token.lower() in message.lower() for token in RETRYABLE_ERROR_TOKENS)
 
 
-def generate_content(client: Dict[str, object], model: str, instruction: str):
-    if client["sdk"] == "google-genai":
-        return client["client"].models.generate_content(model=model, contents=instruction)
+def track_google_usage(response, token_tracker: Dict[str, int]) -> None:
+    meta = getattr(response, "usage_metadata", None)
+    if not meta:
+        return
+    token_tracker["input"] += getattr(meta, "prompt_token_count", 0) or 0
+    token_tracker["output"] += getattr(meta, "candidates_token_count", 0) or 0
 
-    model_client = client["module"].GenerativeModel(model)
-    return model_client.generate_content(instruction)
 
-
-def generate_mixed_prompts(
+def generate_llm_text(
     client: Dict[str, object],
-    models: List[str],
-    left: Dict[str, str],
-    right: Dict[str, str],
-    char_limit: int,
-    num_outputs: int,
+    model: str,
+    instruction: str,
     token_tracker: Dict[str, int],
-) -> List[str]:
-    instruction = build_mix_instruction(left, right, char_limit, num_outputs)
+) -> str:
     if client["sdk"] == "openai":
         response = client["client"].chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": instruction}],
         )
         if response.usage:
-            token_tracker["input"] += response.usage.prompt_tokens
-            token_tracker["output"] += response.usage.completion_tokens
-        text = strip_code_fence(response.choices[0].message.content or "")
-    elif client["sdk"] == "google-genai":
+            token_tracker["input"] += response.usage.prompt_tokens or 0
+            token_tracker["output"] += response.usage.completion_tokens or 0
+        return strip_code_fence(response.choices[0].message.content or "")
+
+    if client["sdk"] == "google-genai":
         response = client["client"].models.generate_content(model=model, contents=instruction)
-        meta = getattr(response, "usage_metadata", None)
-        if meta:
-            token_tracker["input"] += getattr(meta, "prompt_token_count", 0) or 0
-            token_tracker["output"] += getattr(meta, "candidates_token_count", 0) or 0
-        text = strip_code_fence(response.text or "")
-    else:
-        model_client = client["module"].GenerativeModel(model)
-        response = model_client.generate_content(instruction)
-        meta = getattr(response, "usage_metadata", None)
-        if meta:
-            token_tracker["input"] += getattr(meta, "prompt_token_count", 0) or 0
-            token_tracker["output"] += getattr(meta, "candidates_token_count", 0) or 0
-        text = strip_code_fence(response.text or "")
-    mixed = [item.strip() for item in text.split(GEMINI_DELIMITER) if item.strip()]
-    return mixed[:num_outputs]
+        track_google_usage(response, token_tracker)
+        return strip_code_fence(getattr(response, "text", "") or "")
+
+    model_client = client["module"].GenerativeModel(model)
+    response = model_client.generate_content(instruction)
+    track_google_usage(response, token_tracker)
+    return strip_code_fence(getattr(response, "text", "") or "")
+
+
+def generate_mixed_prompts(
+    client: Dict[str, object],
+    model: str,
+    left: Dict[str, str],
+    right: Dict[str, str],
+    char_limit: int,
+    num_outputs: int,
+    token_tracker: Dict[str, int],
+    retries: int,
+    retry_delay: float,
+    retry_backoff: float,
+) -> List[str]:
+    instruction = build_mix_instruction(left, right, char_limit, num_outputs)
+    delay = retry_delay
+    last_error = None
+
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            text = generate_llm_text(client, model, instruction, token_tracker)
+            mixed = [item.strip() for item in text.split(GEMINI_DELIMITER) if item.strip()]
+            return mixed[:num_outputs]
+        except Exception as exc:
+            last_error = exc
+            if attempt >= retries or not is_retryable_llm_error(exc):
+                raise
+            print(f"  [RETRY] {exc} (attempt {attempt}/{retries}); waiting {delay:.1f}s")
+            time.sleep(delay)
+            delay *= retry_backoff
+
+    raise last_error
 
 
 def get_client(api_key: Optional[str], api_use: str = "gemini") -> Dict[str, object]:
     if api_use == "gpt":
         if not openai_module:
-            raise RuntimeError("openai 패키지가 설치되지 않았습니다: pip install openai")
+            raise RuntimeError("openai package is not installed. Run: pip install openai")
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다.")
+            raise RuntimeError("OPENAI_API_KEY environment variable is required.")
         return {
             "sdk": "openai",
             "client": openai_module.OpenAI(api_key=api_key),
@@ -244,12 +270,15 @@ def get_client(api_key: Optional[str], api_use: str = "gemini") -> Dict[str, obj
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Use an LLM (Gemini or GPT) to synthesize mixed prompts from existing Garak prompt files."
+        description="Use an LLM to synthesize mixed prompts from existing Garak prompt files."
     )
     parser.add_argument("--prompt-dir", default="garak")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
-    parser.add_argument("--model", default=None,
-                        help="사용할 모델 이름. 기본값: gemini=gemini-2.5-flash, gpt=gpt-4o-mini")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model name. Defaults: gemini=gemini-2.5-flash, gpt=gpt-4o-mini",
+    )
     parser.add_argument("--char-limit", type=int, default=DEFAULT_CHAR_LIMIT)
     parser.add_argument("--prompts-per-technique", type=int, default=DEFAULT_PROMPTS_PER_TECHNIQUE)
     parser.add_argument("--mixed-per-pair", type=int, default=DEFAULT_MIXED_PER_PAIR)
@@ -258,8 +287,12 @@ def main():
     parser.add_argument("--retry-delay", type=float, default=15.0)
     parser.add_argument("--retry-backoff", type=float, default=1.8)
     parser.add_argument("--sleep", type=float, default=1.0)
-    parser.add_argument("--api-use", choices=["gemini", "gpt"], default="gemini",
-                        help="프롬프트 혼합 생성에 사용할 API (기본값: gemini)")
+    parser.add_argument(
+        "--api-use",
+        choices=["gemini", "gpt"],
+        default="gemini",
+        help="API used to synthesize mixed prompts (default: gemini)",
+    )
     args = parser.parse_args()
 
     if args.model is None:
@@ -289,18 +322,16 @@ def main():
     }
 
     load_env_file()
-    if args.api_use == "gpt":
-        api_key = os.environ.get("OPENAI_API_KEY")
-    else:
-        api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("OPENAI_API_KEY") if args.api_use == "gpt" else os.environ.get("GEMINI_API_KEY")
     client = get_client(api_key, api_use=args.api_use)
-    print(f"[API] {args.api_use.upper()} 모드 사용 중 (모델: {args.model})")
+    print(f"[API] Using {args.api_use.upper()} mode (model: {args.model})")
+
     mixed_results = []
     token_tracker: Dict[str, int] = {"input": 0, "output": 0}
 
     technique_pairs = list(itertools.combinations(prompts_by_technique.keys(), 2))
     print(f"\n[MIX START] Processing {len(technique_pairs)} technique pair(s).")
-    print(f"[MODELS] {' -> '.join(models)}")
+    print(f"[MODEL] {args.model}")
 
     for left_technique, right_technique in technique_pairs:
         left_prompts = prompts_by_technique.get(left_technique, [])
@@ -316,12 +347,15 @@ def main():
             try:
                 mixed_prompts = generate_mixed_prompts(
                     client=client,
-                    models=models,
+                    model=args.model,
                     left=left,
                     right=right,
                     char_limit=args.char_limit,
                     num_outputs=args.mixed_per_pair,
                     token_tracker=token_tracker,
+                    retries=args.retries,
+                    retry_delay=args.retry_delay,
+                    retry_backoff=args.retry_backoff,
                 )
             except Exception as e:
                 mixed_results.append({
@@ -358,20 +392,20 @@ def main():
     pricing = MODEL_PRICING.get(args.model)
 
     print("\n" + "=" * 60)
-    print("[DEBUG] 토큰 사용량 및 비용")
-    print(f"  모델       : {args.model}")
-    print(f"  입력 토큰  : {total_input:,}")
-    print(f"  출력 토큰  : {total_output:,}")
-    print(f"  합계 토큰  : {total_tokens:,}")
+    print("[DEBUG] Token usage and estimated cost")
+    print(f"  model        : {args.model}")
+    print(f"  input tokens : {total_input:,}")
+    print(f"  output tokens: {total_output:,}")
+    print(f"  total tokens : {total_tokens:,}")
     if pricing:
-        input_cost  = total_input  / 1_000_000 * pricing["input"]
+        input_cost = total_input / 1_000_000 * pricing["input"]
         output_cost = total_output / 1_000_000 * pricing["output"]
-        total_cost  = input_cost + output_cost
-        print(f"  입력 비용  : ${input_cost:.6f}  (${pricing['input']:.3f} / 1M)")
-        print(f"  출력 비용  : ${output_cost:.6f}  (${pricing['output']:.3f} / 1M)")
-        print(f"  총 비용    : ${total_cost:.6f}")
+        total_cost = input_cost + output_cost
+        print(f"  input cost   : ${input_cost:.6f}  (${pricing['input']:.3f} / 1M)")
+        print(f"  output cost  : ${output_cost:.6f}  (${pricing['output']:.3f} / 1M)")
+        print(f"  total cost   : ${total_cost:.6f}")
     else:
-        print(f"  비용       : '{args.model}' 가격 정보 없음 (MODEL_PRICING에 직접 추가하세요)")
+        print(f"  cost         : no pricing data for '{args.model}' in MODEL_PRICING.")
     print("=" * 60)
 
 
