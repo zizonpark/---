@@ -13,7 +13,6 @@ import json
 import time
 import copy
 import argparse
-import itertools
 import subprocess
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -977,11 +976,7 @@ def main():
 
     # 2단계: 기법 조합 생성
     techniques_list = list(TECHNIQUE_MAP.keys())
-    combinations =[]
-    for t in techniques_list:
-        combinations.append([t])
-    for t_tuple in itertools.combinations(techniques_list, 2):
-        combinations.append(list(t_tuple))
+    combinations = [[t] for t in techniques_list]
 
     all_responses =[]
     all_gemini_prompts =[]
