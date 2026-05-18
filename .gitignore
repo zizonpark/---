@@ -13,3 +13,4 @@ arrayz1_views/
 
 # Local model weights/checkpoints
 mistral-7B-v0.1/
+mistral-7B-instruct/

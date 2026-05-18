@@ -87,6 +87,7 @@ SAMPLE_INJECTION_PROMPT = (
 )
 SAMPLE_INJECTION_REPEAT = 5
 DEFAULT_MIXED_PROMPTS_JSON = "mixed_prompts.json"
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 def pretty(obj):
     try:
@@ -243,6 +244,22 @@ def extract_prompt_probe(entries: List[dict]) -> List[Dict[str, Optional[str]]]:
 
 def save_json(path: Path, obj):
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def resolve_existing_path(path_value: str, description: str) -> Path:
+    path = Path(path_value).expanduser()
+    if path.exists():
+        return path
+
+    if not path.is_absolute():
+        script_relative = SCRIPT_DIR / path
+        if script_relative.exists():
+            return script_relative
+
+    checked = [str(path)]
+    if not path.is_absolute():
+        checked.append(str(SCRIPT_DIR / path))
+    raise FileNotFoundError(f"{description} not found. Checked: {', '.join(checked)}")
 
 
 def load_mixed_prompt_dataset(path: Path, limit_per_combo: int = MAX_EXTRACTED_PROMPTS) -> Dict[str, List[dict]]:
@@ -465,6 +482,8 @@ def get_alignment_arena_csrf(sess: "requests.Session", endpoint: str, timeout: i
 def ensure_alignment_arena_prompt(prompt: str, current_limit: int) -> str:
     placeholder = "{{ unsafe_request }}"
     cleaned = prompt.strip()
+    if cleaned.upper() in {"BLOCKED", "{BLOCKED}"}:
+        return "{BLOCKED}"
     if placeholder not in cleaned:
         cleaned = f"{cleaned}\n\n{placeholder}"
     if len(cleaned) > current_limit:
@@ -578,8 +597,10 @@ def run_mistral_gate_pipeline(
     endpoints: List[str],
 ) -> None:
     from mistral_gate import (
+        BLOCKED_PROMPT,
         ConfusionMatrixTracker,
         MistralGate,
+        heuristic_classify_prompt,
         load_after_input,
         validate_after_record,
     )
@@ -587,14 +608,19 @@ def run_mistral_gate_pipeline(
     if not args.after_input:
         raise RuntimeError("--use-mistral-gate requires --after-input.")
 
+    after_input_path = resolve_existing_path(args.after_input, "--after-input")
+    mistral_model_dir = resolve_existing_path(args.mistral_model_dir, "--mistral-model-dir")
+
     records = [
         validate_after_record(record, index)
-        for index, record in enumerate(load_after_input(Path(args.after_input)), 1)
+        for index, record in enumerate(load_after_input(after_input_path), 1)
     ]
     print(f"[Mistral Gate] loaded {len(records)} after-input record(s).")
+    print(f"[Mistral Gate] after-input path: {after_input_path}")
+    print(f"[Mistral Gate] model dir: {mistral_model_dir}")
 
     gate = MistralGate(
-        model_dir=Path(args.mistral_model_dir),
+        model_dir=mistral_model_dir,
         backend=args.mistral_backend,
         device=args.mistral_device,
         max_new_tokens=args.mistral_max_new_tokens,
@@ -602,6 +628,12 @@ def run_mistral_gate_pipeline(
         retries=args.mistral_retries,
         retry_delay=args.mistral_retry_delay,
     )
+
+    def build_review_prompt(candidate_prompt: str) -> str:
+        if args.platform == "alignmentarena":
+            return ensure_alignment_arena_prompt(candidate_prompt, current_limit)
+        return candidate_prompt
+
     tracker = ConfusionMatrixTracker()
     sess = requests.Session()
     responses_after = []
@@ -625,7 +657,7 @@ def run_mistral_gate_pipeline(
         try:
             predicted, classifier_raw = gate.classify(original_prompt)
         except Exception as e:
-            predicted = 1
+            predicted = heuristic_classify_prompt(original_prompt)
             classifier_raw = str(e)
             print(f"[Mistral classify error] {e}")
 
@@ -644,6 +676,34 @@ def run_mistral_gate_pipeline(
                 normalization_raw = str(e)
                 print(f"[Mistral normalize error] {e}")
             sent_prompt_base = normalized_prompt or original_prompt
+        else:
+            sent_prompt_base = original_prompt
+
+        safety_loop = None
+        try:
+            sent_prompt_base, safety_loop = gate.normalize_until_safe(
+                sent_prompt_base,
+                original_prompt=original_prompt,
+                review_prompt_builder=build_review_prompt,
+            )
+        except Exception as e:
+            sent_prompt_base = BLOCKED_PROMPT
+            safety_loop = {
+                "blocked": True,
+                "reason": "safety_loop_error",
+                "loops_used": 0,
+                "max_loops": 3,
+                "final_review_label": None,
+                "error": str(e),
+                "steps": [],
+            }
+            print(f"[Mistral safety loop error] {e}")
+
+        if safety_loop and (safety_loop.get("blocked") or safety_loop.get("loops_used", 0) > 0):
+            normalized_prompt = sent_prompt_base
+            used_normalization = True
+
+        if used_normalization:
             normalized_prompts.append({
                 "probe_name": probe_name,
                 "techniques_used": record.get("techniques_used"),
@@ -651,9 +711,8 @@ def run_mistral_gate_pipeline(
                 "normalized_prompt": sent_prompt_base,
                 "mistral_classifier_raw": classifier_raw,
                 "mistral_normalization_raw": normalization_raw,
+                "mistral_safety_loop": safety_loop,
             })
-        else:
-            sent_prompt_base = original_prompt
 
         for endpoint in endpoints:
             sent_prompt = sent_prompt_base
@@ -676,6 +735,7 @@ def run_mistral_gate_pipeline(
                 "used_normalization": used_normalization,
                 "normalized_prompt": normalized_prompt,
                 "mistral_normalization_raw": normalization_raw,
+                "mistral_safety_loop": safety_loop,
                 "sent_prompt": sent_prompt,
                 "mistral_metrics_snapshot": metrics_snapshot,
                 "error": None,
